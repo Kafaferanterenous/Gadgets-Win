@@ -1,0 +1,62 @@
+GADGETS - NEXT VERSION NOTES
+Recorded: 23 July 2026
+
+STATUS
+------
+Planning reminder only. Do not implement until the next Gadgets development
+session with the user.
+
+
+MOVE REMINDER
+-------------
+Add an optional reminder to move in the next version of Gadgets.
+
+Proposed behaviour:
+
+* The reminder interval is entered or selected by the user in Settings.
+* The predefined/default interval is 60 minutes.
+* When the interval expires, temporarily replace the existing "ShutDown"
+  label with:
+
+                       -> Move <-
+
+* Display the Move reminder for 30 seconds, then restore the normal
+  "ShutDown" label.
+* Do not add a separate panel. Fit the reminder controls into the existing
+  Settings interface.
+* The user can optionally enable a short beep or other suitable reminder
+  sound.
+
+
+POINTS TO DECIDE NEXT TIME
+--------------------------
+* Sensible minimum and maximum user-entered intervals.
+* Whether the interval is entered as minutes, selected from common values,
+  or both.
+* Whether the reminder timer resets when Gadgets starts, when Settings are
+  saved, or after each completed reminder.
+* Which Windows sound is noticeable without being harsh or alarming.
+* Whether the sound should play once or use a very short two-tone signal.
+* Whether the Move label should flash or remain steady. A steady label is
+  likely less distracting and should be the initial choice.
+* How the reminder behaves while Settings is open or while Windows is
+  shutting down.
+* Whether changing the ShutDown label affects its click target. Prefer to
+  retain the existing control and behaviour unless the user chooses otherwise.
+
+
+INITIAL DESIGN OPINION
+----------------------
+This is a good fit for the current compact interface. Reusing the ShutDown
+label for 30 seconds makes the reminder prominent without consuming permanent
+screen space. A 60-minute default is reasonable, while a user-defined interval
+and optional sound allow people to choose how intrusive the reminder should be.
+
+The next implementation should also make it immediately clear in Settings that
+the reminder and its sound are optional.
+
+
+IMPLEMENTATION STATUS - 27 JULY 2026
+------------------------------------
+This planning reminder was implemented and live-tested as Gadgets v7. See
+V7_PROGRESS.txt and README_v7.md for the final behavior and verification record.

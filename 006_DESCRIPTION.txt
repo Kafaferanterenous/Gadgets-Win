@@ -1,5 +1,0 @@
-Gadgets native Windows desktop utility experiments
-
-Versioned FASM/Win32 desktop gadget experiments with configurable reminders,
-appearance options, and portable build materials. Historical versions are
-preserved for comparison; visual validation is not implied by static files.

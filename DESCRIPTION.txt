@@ -1,0 +1,4 @@
+Gadgets Win
+
+Portable native Windows clock, calendar, volume, and deliberately gated
+shutdown gadgets with local multilingual Windows speech support.

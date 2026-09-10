@@ -8,7 +8,7 @@ if not exist "%FASM%" (
   exit /b 1
 )
 
-"%FASM%" gadgets_v9.asm gadgets_v9.exe
+"%FASM%" gadgets_v10.asm gadgets_v10.exe
 if errorlevel 1 exit /b 1
 echo.
-echo Built gadgets_v9.exe successfully.
+echo Built gadgets_v10.exe successfully.

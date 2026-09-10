@@ -1,0 +1,153 @@
+GADGETS V10 - FLICKER AND SHUTDOWN CONTROL UPDATE
+Recorded: 2 September 2026, Australia/Adelaide
+
+COMPLETED
+---------
+* Created the active E:\Codex_Work project as a selected copy of historical
+  Gadgets v9. The historical E:\scripts source and known-good v9 artifacts
+  were not modified.
+* Added transition-only hover invalidation. Repeated WM_MOUSEMOVE messages no
+  longer request a full repaint, and hover repainting no longer erases the
+  background first.
+* Added date-aware calendar refresh instead of repainting the calendar on every
+  one-second timer tick.
+* Added a compatible-memory-DC calendar paint path and publishes each finished
+  calendar frame with one BitBlt operation.
+* Removed the app's immediate-shutdown confirmation and delayed-shutdown
+  information dialogs.
+* Immediate Now speaks "Shutting down now" synchronously, then invokes the
+  local Windows `shutdown.exe /p /f` no-timeout/no-warning path. `/f` can cause
+  loss of unsaved work.
+* Delayed shutdown uses `shutdown.exe /s /t <seconds>`. On a zero exit code,
+  Delay changes to Cancel and the delay edit is hidden. Cancel invokes
+  `shutdown.exe /a`, waits for a zero exit code, restores the controls, and
+  speaks "Shutdown cancelled."
+* Schedule, cancel, and command-failure voice paths use the installed Windows
+  SAPI voice. Speech failure does not fabricate command success.
+
+VERIFIED OFFLINE
+----------------
+* build_v10.cmd: FASM 1.73.35, five passes, 57,856-byte PE32 GUI executable.
+* test_v10_offline.ps1: PASS (23 source contracts, 3 timer contracts,
+  3 shutdown contracts, 1 hover contract, 11 PE import checks, and 5 preserved
+  v9 hash checks).
+* gadgets_v10.asm SHA-256:
+  12C9739285AF92C3CB4E1CD455AEB86BDE5E5EAABAF3EA1648CCAC62A079289C
+* gadgets_v10.exe SHA-256:
+  35F6AB3B931210FBB5C336905576D52DA77D54C7E339D937D3585A79EB49D7AC
+* gadgets_v10.ini SHA-256:
+  1E57D4C0636F8E5ABAB84CBED8B616DE732B114BDF500F1D0ADA91BF5CE9BB1A
+
+PENDING / UNVERIFIED
+--------------------
+* No Gadgets v10 GUI was launched, so visual hover acceptance and general
+  responsiveness remain pending.
+* No SAPI voice was played, so the new phrases remain live-audio unverified.
+* No shutdown, delayed shutdown, or abort command was executed. Actual power
+  behavior and live Cancel acceptance remain deliberately unverified.
+* The portable package remains unchanged. Package v10 only after explicit
+  GUI/audio/power-test authorization and live acceptance.
+
+UPDATE - 3 September 2026, 08:23 Australia/Adelaide
+---------------------------------------------------
+
+COMPLETED
+---------
+* Added SHUTDOWN above the Now and Delay/Cancel controls and moved the controls
+  down so the title does not overlap them.
+* Reduced the settings dialog from 443 to 305 dialog units and consolidated
+  the font controls into a compact grid with minimal usable spacing.
+* Added one persisted speech-language choice for all spoken paths: English,
+  Polish, Italian, Spanish, German, Japanese, or Mandarin.
+* Localized time, date, MOVE, immediate shutdown, scheduled shutdown,
+  cancellation, and command-failure speech.
+* Clock left-click now speaks the selected-language time. Left-clicking the
+  calendar full-date line now speaks the selected-language date.
+* Added Time, Date, and MOVE speech-test buttons to the compact settings dialog.
+* Added honest missing-voice handling: native SAPI token enumeration verifies
+  and selects a matching installed voice before any selected-language speech.
+  The app does not download or install voices.
+
+VERIFIED OFFLINE
+----------------
+* build_v10.cmd: FASM 1.73.35, five passes, 69,120-byte PE32 GUI executable.
+* test_v10_offline.ps1: PASS (43 source, 3 timer, 3 shutdown, 1 hover,
+  3 click-speech, 15 language, 5 voice-selection, 2 compact-layout,
+  14 PE-import, and 5 preserved-v9 checks).
+* gadgets_v10.asm SHA-256:
+  47B60B2225C685A413E162BEEBB868C91C4514BEEB206CC53B0DBFF578535149
+* gadgets_v10.exe SHA-256:
+  733A618BBA03FB84938029DBA99C246E1B6753205DFE2A1439DBC4DF37E58111
+* gadgets_v10.ini SHA-256:
+  3146B5A58E93DBFD35608C10B805AABF7439B956FC5A2D9338930350F27E35A4
+* test_v10_offline.ps1 SHA-256:
+  4F903A08DDBCC687186140A74115CF729070B01362E41A2D2DC389E14C89E8E8
+
+PENDING / UNVERIFIED
+--------------------
+* No Gadgets v10 GUI was launched. The compact settings layout, shutdown title,
+  click hit areas, and general responsiveness remain visually unverified.
+* No SAPI audio was played. Pronunciation and installed-voice availability for
+  all seven languages remain live-audio unverified.
+* No shutdown, delayed shutdown, or abort command was executed. Actual power
+  behavior and live Cancel acceptance remain deliberately unverified.
+* The portable package remains unchanged pending explicit live acceptance.
+
+VISUAL-FEEDBACK CORRECTION - 3 September 2026, 08:54 Australia/Adelaide
+------------------------------------------------------------------------
+* User confirmed the compact settings area looks good.
+* User reported the SHUTDOWN label was overlaid by the two buttons.
+* Corrected CalculateSizes, which was still resetting the scaled button top to
+  the historical y=7 position. The buttons now begin at y=28.
+* Increased the shutdown panel from 108 to 126 logical units and moved the
+  delay field/progress bar to y=69, with elapsed text at y=113.
+* Rebuilt gadgets_v10.exe: FASM 1.73.35, five passes, 69,120 bytes.
+* Expanded offline suite: PASS. It now asserts the scaled button coordinate,
+  taller panel, lowered progress bar, and matching delay-field position.
+* gadgets_v10.asm SHA-256:
+  CBCBD2772BD726989E65C72FC85B013540160A19996C9E41E7560484BD1ACF6C
+* gadgets_v10.exe SHA-256:
+  901FCA3D822510954E0CB9854BA812B4B1C787734F2187F18DF8B89B82091767
+* test_v10_offline.ps1 SHA-256:
+  2AC6B7E180A3C72793C6F07A6B0C9F4D649B8F08F1934A87D4B06E52AF5395E1
+* The corrected shutdown geometry still requires user visual confirmation.
+  No GUI, audio, or shutdown command was run during this correction.
+
+VOICE CORRECTION - 3 September 2026, 09:05 Australia/Adelaide
+----------------------------------------------------------------
+* Restored English to the default SAPI voice path used before multilingual
+  selection, removing the enumeration gate that caused the regression.
+* Added Windows OneCore voice discovery alongside legacy desktop SAPI. A
+  read-only, no-audio COM check confirmed OneCore tokens are accepted by SAPI.
+* Current no-audio inventory result: English, Polish, Spanish, German,
+  Mandarin, and French available; Italian and Japanese unavailable.
+* Replaced the language combo with eight radio buttons so unavailable choices
+  are disabled/greyed out.
+* Added French time, date, MOVE, immediate/scheduled shutdown, cancellation,
+  and failure speech.
+* Added Manage voices... to open `ms-settings:speech` only when the user clicks
+  it, plus Refresh to rescan after voice installation.
+* FASM 1.73.35 build: PASS, five passes, 70,656-byte PE32 GUI executable.
+* test_v10_offline.ps1: PASS (59 source, 3 timer, 3 shutdown, 1 hover,
+  3 click-speech, 26 language, 10 voice-selection, 4 compact-layout,
+  14 PE-import, and 5 preserved-v9 checks).
+* gadgets_v10.asm SHA-256:
+  BF2B88BD527564AF0EC32F3CFAA6CD91E3FFA9553BD6BDBCC71E796F12793AD3
+* gadgets_v10.exe SHA-256:
+  CDB7FDE3A424FC5C36F149AE02713AABD7F22B447669FA0E07E938ED8C739EFA
+* gadgets_v10.ini SHA-256:
+  4E495968620B18C44382F1E46C954F3AB68640229F2E04FC7915DB52FF3317DF
+* test_v10_offline.ps1 SHA-256:
+  DB2B1FBC183AA35E2E03DD7DDE11DA37FD9EC788A5A7D4F1BDED3C684BB33AC0
+* No Gadgets GUI, Windows Settings page, SAPI audio, or power command was
+  launched during this correction. Live UI/audio acceptance remains pending.
+
+GITHUB SCREENSHOT REVIEW - 10 September 2026
+---------------------------------------------
+* Launched a fresh isolated copy solely for a privacy-safe screenshot.
+* Visually reviewed the clock, calendar, shutdown, and volume panels; the
+  corrected SHUTDOWN heading and controls are separated and readable.
+* No gadget control was clicked. No speech, Windows Settings page, shutdown,
+  delayed shutdown, abort command, or other power action was invoked.
+* The Settings dialog, installed voice behaviour, and all live power actions
+  remain unverified.

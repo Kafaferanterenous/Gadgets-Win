@@ -1,12 +1,13 @@
 
 
 
-; Gadgets v9 - scalable, hideable, configurable desktop panels with SAPI time announcements.
+; Gadgets v10 - flicker-resistant panels and cancellable spoken shutdown controls.
 
 format PE GUI 4.0
 entry start
 
 include 'win32a.inc'
+include 'encoding/utf8.inc'
 
 struc GUID def
  {
@@ -60,6 +61,45 @@ interface ISpVoice,\
           IsUISupported,\
           DisplayUI
 
+interface ISpObjectTokenCategory,\
+          QueryInterface,\
+          AddRef,\
+          Release,\
+          SetData,\
+          GetData,\
+          SetStringValue,\
+          GetStringValue,\
+          SetDWORD,\
+          GetDWORD,\
+          OpenKey,\
+          CreateKey,\
+          DeleteKey,\
+          DeleteValue,\
+          EnumKeys,\
+          EnumValues,\
+          SetId,\
+          GetId,\
+          GetDataKey,\
+          EnumTokens,\
+          SetDefaultTokenId,\
+          GetDefaultTokenId
+
+interface IEnumSpObjectTokens,\
+          QueryInterface,\
+          AddRef,\
+          Release,\
+          Next,\
+          Skip,\
+          Reset,\
+          Clone,\
+          Item,\
+          GetCount
+
+interface ISpObjectToken,\
+          QueryInterface,\
+          AddRef,\
+          Release
+
 IDC_NOW       = 201
 IDC_3MIN      = 202
 IDC_DELAYEDIT = 203
@@ -88,12 +128,36 @@ IDC_ANNOUNCE30  = 321
 IDC_ANNOUNCE60  = 322
 IDC_TESTVOICE   = 323
 IDC_TESTMOVE    = 324
+IDC_LANG_ENGLISH  = 325
+IDC_LANG_POLISH   = 326
+IDC_LANG_ITALIAN  = 327
+IDC_LANG_SPANISH  = 328
+IDC_LANG_GERMAN   = 329
+IDC_LANG_JAPANESE = 330
+IDC_LANG_MANDARIN = 331
+IDC_LANG_FRENCH   = 332
+IDC_MANAGEVOICES  = 333
+IDC_TESTDATE      = 334
+IDC_REFRESHVOICES = 335
 TIMER_CLOCK   = 1
 HTCAPTION     = 2
 LOCALE_USER_DEFAULT = 0400h
 CLSCTX_INPROC_SERVER = 1
 SPF_ASYNC = 1
 SPF_PURGEBEFORESPEAK = 2
+SPF_IS_XML = 8
+DATE_LONGDATE = 2
+TIME_NOSECONDS = 2
+
+LANGUAGE_ENGLISH  = 0
+LANGUAGE_POLISH   = 1
+LANGUAGE_ITALIAN  = 2
+LANGUAGE_SPANISH  = 3
+LANGUAGE_GERMAN   = 4
+LANGUAGE_JAPANESE = 5
+LANGUAGE_MANDARIN = 6
+LANGUAGE_FRENCH   = 7
+LANGUAGE_COUNT    = 8
 
 CLOCK_W       = 250
 CLOCK_H       = 250
@@ -102,7 +166,7 @@ CAL_H         = 420
 VOL_W         = 250
 VOL_H         = 92
 SHUT_W        = 250
-SHUT_H        = 108
+SHUT_H        = 126
 PADDING       = 12
 GAP           = 8
 
@@ -138,6 +202,7 @@ start:
         jz      startup_error
         call    ResetMoveReminder
         call    ResetTimeAnnouncement
+        call    UpdateCalendarDate
 
         invoke  SetTimer, [clock_hwnd], TIMER_CLOCK, 1000, 0
 
@@ -244,8 +309,10 @@ proc WindowProc uses ebx esi edi, hwnd, wmsg, wparam, lparam
         call    UpdateTimeAnnouncement
         call    PollHover
         invoke  InvalidateRect, [clock_hwnd], 0, FALSE
-        invoke  InvalidateRect, [calendar_hwnd], 0, FALSE
-        invoke  InvalidateRect, [volume_hwnd], 0, FALSE
+        call    UpdateCalendarDate
+        mov     eax, [move_active]
+        or      eax, [shutdown_active]
+        jz      .handled
         invoke  InvalidateRect, [shutdown_hwnd], 0, FALSE
         jmp     .handled
 
@@ -258,12 +325,12 @@ proc WindowProc uses ebx esi edi, hwnd, wmsg, wparam, lparam
         je      .shutdown_3min
         jmp     .handled
   .shutdown_now:
-        invoke  MessageBox, [hwnd], confirm_shutdown, shutdown_title, MB_YESNO+MB_ICONWARNING+MB_DEFBUTTON2
-        cmp     eax, IDYES
-        jne     .handled
+        call    SpeakShutdownNow
         invoke  ShellExecute, [hwnd], 0, shutdown_exe, args_now, 0, SW_HIDE
         jmp     .handled
   .shutdown_3min:
+        cmp     [shutdown_active], 0
+        jne     .cancel_shutdown
         lea     eax, [translated]
         invoke  GetDlgItemInt, [shutdown_hwnd], IDC_DELAYEDIT, eax, FALSE
         cmp     [translated], FALSE
@@ -271,14 +338,32 @@ proc WindowProc uses ebx esi edi, hwnd, wmsg, wparam, lparam
         test    eax, eax
         jz      .bad_delay
         mov     [shutdown_delay], eax
+        call    BuildShutdownCommand
+        stdcall RunShutdownCommand, command_args
+        test    eax, eax
+        jz      .shutdown_command_failed
         invoke  GetTickCount
         mov     [shutdown_start_tick], eax
         mov     [shutdown_active], 1
         invoke  ShowWindow, [delay_edit], SW_HIDE
-        call    BuildShutdownCommand
-        invoke  ShellExecute, [hwnd], 0, shutdown_exe, command_args, 0, SW_HIDE
-        cinvoke wsprintf, message_buffer, scheduled_format, [shutdown_delay]
-        invoke  MessageBox, [hwnd], message_buffer, shutdown_title, MB_OK+MB_ICONINFORMATION
+        invoke  SetWindowText, [min3_button], cancel_text
+        call    SpeakShutdownScheduled
+        invoke  InvalidateRect, [shutdown_hwnd], 0, FALSE
+        jmp     .handled
+  .cancel_shutdown:
+        call    BuildAbortCommand
+        stdcall RunShutdownCommand, command_args
+        test    eax, eax
+        jz      .shutdown_command_failed
+        mov     [shutdown_active], 0
+        mov     [shutdown_elapsed], 0
+        invoke  SetWindowText, [min3_button], delay_text
+        invoke  ShowWindow, [delay_edit], SW_SHOWNA
+        call    SpeakShutdownCancelled
+        invoke  InvalidateRect, [shutdown_hwnd], 0, FALSE
+        jmp     .handled
+  .shutdown_command_failed:
+        call    SpeakShutdownFailed
         jmp     .handled
   .bad_delay:
         invoke  MessageBox, [hwnd], delay_error, shutdown_title, MB_OK+MB_ICONWARNING
@@ -289,12 +374,16 @@ proc WindowProc uses ebx esi edi, hwnd, wmsg, wparam, lparam
         mov     [track_hwnd], eax
         invoke  TrackMouseEvent, track_mouse
         call    SetHoverForWindow
-        invoke  InvalidateRect, [hwnd], 0, TRUE
+        test    eax, eax
+        jz      .handled
+        invoke  InvalidateRect, [hwnd], 0, FALSE
         jmp     .handled
   .mouseleave:
         mov     eax, [hwnd]
         call    ClearHoverForWindow
-        invoke  InvalidateRect, [hwnd], 0, TRUE
+        test    eax, eax
+        jz      .handled
+        invoke  InvalidateRect, [hwnd], 0, FALSE
         jmp     .handled
   .leftclick:
         mov     eax, [lparam]
@@ -319,6 +408,22 @@ proc WindowProc uses ebx esi edi, hwnd, wmsg, wparam, lparam
         invoke  PostQuitMessage, 0
         jmp     .handled
   .not_close:
+        mov     eax, [hwnd]
+        cmp     eax, [clock_hwnd]
+        jne     .check_date_click
+        call    SpeakCurrentTime
+        jmp     .drag_window
+  .check_date_click:
+        cmp     eax, [calendar_hwnd]
+        jne     .check_volume_click
+        mov     eax, [click_y]
+        cmp     eax, 368
+        jb      .drag_window
+        cmp     eax, 410
+        ja      .drag_window
+        call    SpeakCurrentDate
+        jmp     .handled
+  .check_volume_click:
         mov     eax, [hwnd]
         cmp     eax, [volume_hwnd]
         jne     .drag_window
@@ -432,6 +537,12 @@ proc SettingsProc uses ebx esi edi, hwnddlg, wmsg, wparam, lparam
         invoke  CheckDlgButton, [hwnddlg], IDC_ONTOP, [keep_on_top]
         invoke  CheckDlgButton, [hwnddlg], IDC_DARKMODE, [dark_mode]
         invoke  SetDlgItemInt, [hwnddlg], IDC_MOVEINT, [move_interval_minutes], FALSE
+        mov     eax, [speech_language]
+        mov     [settings_original_language], eax
+        call    RefreshSpeechAvailability
+        stdcall UpdateSpeechLanguageControls, [hwnddlg]
+        mov     eax, [speech_language]
+        mov     [settings_original_language], eax
         mov     eax, IDC_ANNOUNCEOFF
         cmp     [time_announcement_minutes], 30
         jne     .check_announce60
@@ -458,9 +569,26 @@ proc SettingsProc uses ebx esi edi, hwnddlg, wmsg, wparam, lparam
         je      .test_voice
         cmp     eax, IDC_TESTMOVE
         je      .test_move
+        cmp     eax, IDC_TESTDATE
+        je      .test_date
+        cmp     eax, IDC_MANAGEVOICES
+        je      .manage_voices
+        cmp     eax, IDC_REFRESHVOICES
+        je      .refresh_voices
         xor     eax, eax
         ret
+  .manage_voices:
+        invoke  ShellExecute, [hwnddlg], NULL, speech_settings_uri, NULL, NULL, SW_SHOWNORMAL
+        mov     eax, TRUE
+        ret
+  .refresh_voices:
+        call    RefreshSpeechAvailability
+        stdcall UpdateSpeechLanguageControls, [hwnddlg]
+        mov     eax, TRUE
+        ret
   .test_voice:
+        stdcall ReadSpeechLanguageFromDialog, [hwnddlg]
+        call    SelectSpeechVoice
         call    SpeakCurrentTime
         test    eax, eax
         jnz     .test_done
@@ -469,11 +597,23 @@ proc SettingsProc uses ebx esi edi, hwnddlg, wmsg, wparam, lparam
         mov     eax, TRUE
         ret
   .test_move:
+        stdcall ReadSpeechLanguageFromDialog, [hwnddlg]
+        call    SelectSpeechVoice
         call    SpeakMovePrompt
         test    eax, eax
         jnz     .test_move_done
         invoke  MessageBox, [hwnddlg], speech_unavailable_text, settings_title, MB_OK+MB_ICONWARNING
   .test_move_done:
+        mov     eax, TRUE
+        ret
+  .test_date:
+        stdcall ReadSpeechLanguageFromDialog, [hwnddlg]
+        call    SelectSpeechVoice
+        call    SpeakCurrentDate
+        test    eax, eax
+        jnz     .test_date_done
+        invoke  MessageBox, [hwnddlg], speech_unavailable_text, settings_title, MB_OK+MB_ICONWARNING
+  .test_date_done:
         mov     eax, TRUE
         ret
   .apply:
@@ -546,6 +686,12 @@ proc SettingsProc uses ebx esi edi, hwnddlg, wmsg, wparam, lparam
         cmp     eax, 99
         ja      .invalid
         mov     [move_interval_minutes], eax
+        stdcall ReadSpeechLanguageFromDialog, [hwnddlg]
+        call    SelectSpeechVoice
+        test    eax, eax
+        jnz     .speech_choice_ready
+        invoke  MessageBox, [hwnddlg], speech_unavailable_text, settings_title, MB_OK+MB_ICONWARNING
+  .speech_choice_ready:
         mov     [time_announcement_minutes], 0
         invoke  IsDlgButtonChecked, [hwnddlg], IDC_ANNOUNCE30
         cmp     eax, BST_CHECKED
@@ -600,14 +746,62 @@ proc SettingsProc uses ebx esi edi, hwnddlg, wmsg, wparam, lparam
         mov     eax, TRUE
         ret
   .cancel:
+        mov     eax, [settings_original_language]
+        mov     [speech_language], eax
+        call    SelectSpeechVoice
         invoke  EndDialog, [hwnddlg], 0
         mov     eax, TRUE
         ret
   .quit:
+        mov     eax, [settings_original_language]
+        mov     [speech_language], eax
         call    SaveSettings
         invoke  EndDialog, [hwnddlg], 0
         invoke  PostMessage, [clock_hwnd], WM_CLOSE, 0, 0
         mov     eax, TRUE
+        ret
+endp
+
+proc ReadSpeechLanguageFromDialog uses esi, hwnddlg
+        xor     esi, esi
+  .check:
+        mov     eax, esi
+        add     eax, IDC_LANG_ENGLISH
+        invoke  IsDlgButtonChecked, [hwnddlg], eax
+        cmp     eax, BST_CHECKED
+        je      .found
+        inc     esi
+        cmp     esi, LANGUAGE_COUNT
+        jb      .check
+        mov     esi, LANGUAGE_ENGLISH
+  .found:
+        cmp     [speech_language_available+esi*4], 0
+        jne     .store
+        mov     esi, LANGUAGE_ENGLISH
+  .store:
+        mov     [speech_language], esi
+        ret
+endp
+
+proc UpdateSpeechLanguageControls uses esi edi, hwnddlg
+        xor     esi, esi
+  .enable_loop:
+        mov     edi, esi
+        add     edi, IDC_LANG_ENGLISH
+        invoke  GetDlgItem, [hwnddlg], edi
+        invoke  EnableWindow, eax, [speech_language_available+esi*4]
+        inc     esi
+        cmp     esi, LANGUAGE_COUNT
+        jb      .enable_loop
+        mov     esi, [speech_language]
+        cmp     [speech_language_available+esi*4], 0
+        jne     .check_choice
+        mov     esi, LANGUAGE_ENGLISH
+        mov     [speech_language], esi
+        call    SelectSpeechVoice
+  .check_choice:
+        add     esi, IDC_LANG_ENGLISH
+        invoke  CheckRadioButton, [hwnddlg], IDC_LANG_ENGLISH, IDC_LANG_FRENCH, esi
         ret
 endp
 
@@ -677,6 +871,12 @@ proc LoadSettings
         xor     eax, eax
   .announcement_ok:
         mov     [time_announcement_minutes], eax
+        invoke  GetPrivateProfileInt, section_global, key_speechlanguage, LANGUAGE_ENGLISH, ini_path
+        cmp     eax, LANGUAGE_COUNT
+        jb      .language_ok
+        mov     eax, LANGUAGE_ENGLISH
+  .language_ok:
+        mov     [speech_language], eax
         invoke  GetPrivateProfileInt, section_visibility, key_showclock, 1, ini_path
         mov     [show_clock], eax
         invoke  GetPrivateProfileInt, section_visibility, key_showcal, 1, ini_path
@@ -736,6 +936,7 @@ proc SaveSettings uses ebx esi edi
         stdcall WriteIniInt, section_global, key_darkmode, [dark_mode]
         stdcall WriteIniInt, section_global, key_moveinterval, [move_interval_minutes]
         stdcall WriteIniInt, section_global, key_timeannouncement, [time_announcement_minutes]
+        stdcall WriteIniInt, section_global, key_speechlanguage, [speech_language]
         stdcall WriteIniInt, section_visibility, key_showclock, [show_clock]
         stdcall WriteIniInt, section_visibility, key_showcal, [show_calendar]
         stdcall WriteIniInt, section_visibility, key_showvol, [show_volume]
@@ -879,19 +1080,147 @@ endp
 proc InitSpeech
         mov     [sapi_com_initialized], 0
         mov     [sapi_voice], 0
+        mov     [sapi_default_token], 0
+        mov     [speech_voice_ready], 0
         invoke  CoInitialize, NULL
         test    eax, eax
         js      .done
         mov     [sapi_com_initialized], 1
         invoke  CoCreateInstance, CLSID_SpVoice, NULL, CLSCTX_INPROC_SERVER, IID_ISpVoice, sapi_voice
         test    eax, eax
-        jns     .done
+        jns     .select_voice
         mov     [sapi_voice], 0
+        jmp     .done
+  .select_voice:
+        cominvk sapi_voice, GetVoice, sapi_default_token
+        call    SelectSpeechVoice
   .done:
         ret
 endp
 
+proc SelectSpeechVoice uses ebx esi edi
+        local category_attempt:DWORD
+        mov     [speech_voice_ready], 0
+        mov     [sapi_category], 0
+        mov     [sapi_tokens], 0
+        mov     [sapi_token], 0
+        mov     [sapi_token_count], 0
+        cmp     [sapi_voice], 0
+        je      .done
+        cmp     [speech_language], LANGUAGE_ENGLISH
+        jne     .enumerate_voice
+        cmp     [sapi_default_token], 0
+        je      .english_ready
+        cominvk sapi_voice, SetVoice, [sapi_default_token]
+        test    eax, eax
+        js      .done
+  .english_ready:
+        mov     [speech_voice_ready], 1
+        jmp     .done
+  .enumerate_voice:
+        mov     [category_attempt], 0
+  .try_category:
+        invoke  CoCreateInstance, CLSID_SpObjectTokenCategory, NULL, CLSCTX_INPROC_SERVER, IID_ISpObjectTokenCategory, sapi_category
+        test    eax, eax
+        js      .next_category
+        mov     eax, [category_attempt]
+        mov     eax, [speech_voice_categories+eax*4]
+        cominvk sapi_category, SetId, eax, FALSE
+        test    eax, eax
+        js      .next_category
+        xor     ebx, ebx
+  .try_attributes:
+        mov     esi, [speech_language]
+        test    ebx, ebx
+        jnz     .fallback_attributes
+        mov     edi, [speech_voice_attributes+esi*4]
+        jmp     .enumerate
+  .fallback_attributes:
+        mov     edi, [speech_voice_fallback_attributes+esi*4]
+        test    edi, edi
+        jz      .cleanup
+  .enumerate:
+        cominvk sapi_category, EnumTokens, edi, NULL, sapi_tokens
+        test    eax, eax
+        js      .next_attributes
+        cominvk sapi_tokens, GetCount, sapi_token_count
+        test    eax, eax
+        js      .release_tokens_for_retry
+        cmp     [sapi_token_count], 0
+        jne     .choose_token
+  .release_tokens_for_retry:
+        cmp     [sapi_tokens], 0
+        je      .next_attributes
+        cominvk sapi_tokens, Release
+        mov     [sapi_tokens], 0
+  .next_attributes:
+        inc     ebx
+        cmp     ebx, 2
+        jb      .try_attributes
+  .next_category:
+        cmp     [sapi_tokens], 0
+        je      .release_category_for_retry
+        cominvk sapi_tokens, Release
+        mov     [sapi_tokens], 0
+  .release_category_for_retry:
+        cmp     [sapi_category], 0
+        je      .advance_category
+        cominvk sapi_category, Release
+        mov     [sapi_category], 0
+  .advance_category:
+        inc     [category_attempt]
+        cmp     [category_attempt], 2
+        jb      .try_category
+        jmp     .cleanup
+  .choose_token:
+        cominvk sapi_tokens, Item, 0, sapi_token
+        test    eax, eax
+        js      .cleanup
+        cominvk sapi_voice, SetVoice, [sapi_token]
+        test    eax, eax
+        js      .cleanup
+        mov     [speech_voice_ready], 1
+  .cleanup:
+        cmp     [sapi_token], 0
+        je      .release_tokens
+        cominvk sapi_token, Release
+        mov     [sapi_token], 0
+  .release_tokens:
+        cmp     [sapi_tokens], 0
+        je      .release_category
+        cominvk sapi_tokens, Release
+        mov     [sapi_tokens], 0
+  .release_category:
+        cmp     [sapi_category], 0
+        je      .done
+        cominvk sapi_category, Release
+        mov     [sapi_category], 0
+  .done:
+        mov     eax, [speech_voice_ready]
+        ret
+endp
+
+proc RefreshSpeechAvailability uses esi edi
+        mov     edi, [speech_language]
+        xor     esi, esi
+  .check_language:
+        mov     [speech_language], esi
+        call    SelectSpeechVoice
+        mov     [speech_language_available+esi*4], eax
+        inc     esi
+        cmp     esi, LANGUAGE_COUNT
+        jb      .check_language
+        mov     [speech_language], edi
+        call    SelectSpeechVoice
+        ret
+endp
+
 proc ShutdownSpeech
+        cmp     [sapi_default_token], 0
+        je      .check_voice
+        cominvk sapi_default_token, Release
+        mov     [sapi_default_token], 0
+  .check_voice:
         cmp     [sapi_voice], 0
         je      .check_com
         cominvk sapi_voice, Release
@@ -955,27 +1284,44 @@ endp
 proc SpeakCurrentTime uses esi
         cmp     [sapi_voice], 0
         je      .failed
+        cmp     [speech_voice_ready], 0
+        je      .failed
         lea     eax, [speech_time]
         invoke  GetLocalTime, eax
-        movzx   eax, [speech_time.wHour]
-        mov     esi, am_text
-        cmp     eax, 12
-        jb      .hour_ready
-        mov     esi, pm_text
-        je      .hour_ready
-        sub     eax, 12
-        jmp     .hour_ready
-  .hour_ready:
-        test    eax, eax
-        jnz     .format
-        mov     eax, 12
-  .format:
-        movzx   ecx, [speech_time.wMinute]
-        cinvoke wsprintf, speech_buffer, speech_time_format, eax, ecx, esi
-        invoke  MultiByteToWideChar, 0, 0, speech_buffer, -1, speech_wide_buffer, 96
+        mov     esi, [speech_language]
+        mov     eax, [speech_lcids+esi*4]
+        lea     ecx, [speech_time]
+        invoke  GetTimeFormatW, eax, TIME_NOSECONDS, ecx, NULL, speech_value_wide, 128
         test    eax, eax
         jz      .failed
-        cominvk sapi_voice, Speak, speech_wide_buffer, SPF_ASYNC+SPF_PURGEBEFORESPEAK, NULL
+        mov     eax, [speech_time_formats+esi*4]
+        cinvoke wsprintfW, speech_wide_buffer, eax, speech_value_wide
+        cominvk sapi_voice, Speak, speech_wide_buffer, SPF_ASYNC+SPF_PURGEBEFORESPEAK+SPF_IS_XML, NULL
+        test    eax, eax
+        js      .failed
+        mov     eax, TRUE
+        ret
+  .failed:
+        xor     eax, eax
+        ret
+endp
+
+proc SpeakCurrentDate uses esi
+        cmp     [sapi_voice], 0
+        je      .failed
+        cmp     [speech_voice_ready], 0
+        je      .failed
+        lea     eax, [speech_time]
+        invoke  GetLocalTime, eax
+        mov     esi, [speech_language]
+        mov     eax, [speech_lcids+esi*4]
+        lea     ecx, [speech_time]
+        invoke  GetDateFormatW, eax, DATE_LONGDATE, ecx, NULL, speech_value_wide, 128
+        test    eax, eax
+        jz      .failed
+        mov     eax, [speech_date_formats+esi*4]
+        cinvoke wsprintfW, speech_wide_buffer, eax, speech_value_wide
+        cominvk sapi_voice, Speak, speech_wide_buffer, SPF_ASYNC+SPF_PURGEBEFORESPEAK+SPF_IS_XML, NULL
         test    eax, eax
         js      .failed
         mov     eax, TRUE
@@ -988,6 +1334,8 @@ endp
 proc SpeakMovePrompt
         cmp     [sapi_voice], 0
         je      .failed
+        cmp     [speech_voice_ready], 0
+        je      .failed
         invoke  GetTickCount
         mov     ecx, eax
         shr     ecx, 8
@@ -996,11 +1344,82 @@ proc SpeakMovePrompt
         shr     ecx, 16
         xor     eax, ecx
         and     eax, 3
-        mov     eax, move_prompt_normal
+        mov     ecx, [speech_language]
+        mov     eax, [move_prompt_normal_ptrs+ecx*4]
         jnz     .speak
-        mov     eax, move_prompt_biological
+        mov     eax, [move_prompt_alternate_ptrs+ecx*4]
   .speak:
-        cominvk sapi_voice, Speak, eax, SPF_ASYNC+SPF_PURGEBEFORESPEAK, NULL
+        cominvk sapi_voice, Speak, eax, SPF_ASYNC+SPF_PURGEBEFORESPEAK+SPF_IS_XML, NULL
+        test    eax, eax
+        js      .failed
+        mov     eax, TRUE
+        ret
+  .failed:
+        xor     eax, eax
+        ret
+endp
+
+proc SpeakShutdownNow
+        cmp     [sapi_voice], 0
+        je      .failed
+        cmp     [speech_voice_ready], 0
+        je      .failed
+        ; Synchronous speech ensures the short prompt finishes before /p powers off.
+        mov     eax, [speech_language]
+        mov     eax, [shutdown_now_prompts+eax*4]
+        cominvk sapi_voice, Speak, eax, SPF_PURGEBEFORESPEAK+SPF_IS_XML, NULL
+        test    eax, eax
+        js      .failed
+        mov     eax, TRUE
+        ret
+  .failed:
+        xor     eax, eax
+        ret
+endp
+
+proc SpeakShutdownScheduled
+        cmp     [sapi_voice], 0
+        je      .failed
+        cmp     [speech_voice_ready], 0
+        je      .failed
+        mov     eax, [speech_language]
+        mov     eax, [shutdown_scheduled_formats+eax*4]
+        cinvoke wsprintfW, speech_wide_buffer, eax, [shutdown_delay]
+        cominvk sapi_voice, Speak, speech_wide_buffer, SPF_ASYNC+SPF_PURGEBEFORESPEAK+SPF_IS_XML, NULL
+        test    eax, eax
+        js      .failed
+        mov     eax, TRUE
+        ret
+  .failed:
+        xor     eax, eax
+        ret
+endp
+
+proc SpeakShutdownCancelled
+        cmp     [sapi_voice], 0
+        je      .failed
+        cmp     [speech_voice_ready], 0
+        je      .failed
+        mov     eax, [speech_language]
+        mov     eax, [shutdown_cancelled_prompts+eax*4]
+        cominvk sapi_voice, Speak, eax, SPF_ASYNC+SPF_PURGEBEFORESPEAK+SPF_IS_XML, NULL
+        test    eax, eax
+        js      .failed
+        mov     eax, TRUE
+        ret
+  .failed:
+        xor     eax, eax
+        ret
+endp
+
+proc SpeakShutdownFailed
+        cmp     [sapi_voice], 0
+        je      .failed
+        cmp     [speech_voice_ready], 0
+        je      .failed
+        mov     eax, [speech_language]
+        mov     eax, [shutdown_failed_prompts+eax*4]
+        cominvk sapi_voice, Speak, eax, SPF_ASYNC+SPF_PURGEBEFORESPEAK+SPF_IS_XML, NULL
         test    eax, eax
         js      .failed
         mov     eax, TRUE
@@ -1131,14 +1550,15 @@ proc CalculateSizes
         mov     [scaled_gap], eax
         invoke  MulDiv, 7, [scale_percent], 100
         mov     [ctrl_x1], eax
+        invoke  MulDiv, 28, [scale_percent], 100
         mov     [ctrl_y1], eax
         invoke  MulDiv, 130, [scale_percent], 100
         mov     [ctrl_x2], eax
         invoke  MulDiv, 113, [scale_percent], 100
         mov     [ctrl_w], eax
-        invoke  MulDiv, 32, [scale_percent], 100
+        invoke  MulDiv, 30, [scale_percent], 100
         mov     [ctrl_h], eax
-        invoke  MulDiv, 45, [scale_percent], 100
+        invoke  MulDiv, 69, [scale_percent], 100
         mov     [edit_y], eax
         invoke  MulDiv, 236, [scale_percent], 100
         mov     [edit_w], eax
@@ -1420,50 +1840,86 @@ endp
 proc SetHoverForWindow
         cmp     eax, [clock_hwnd]
         jne     .calendar
+        cmp     [hover_clock], 1
+        je      .unchanged
         mov     [hover_clock], 1
-        ret
+        jmp     .changed
   .calendar:
         cmp     eax, [calendar_hwnd]
         jne     .volume
+        cmp     [hover_calendar], 1
+        je      .unchanged
         mov     [hover_calendar], 1
-        ret
+        jmp     .changed
   .volume:
         cmp     eax, [volume_hwnd]
         jne     .shutdown
+        cmp     [hover_volume], 1
+        je      .unchanged
         mov     [hover_volume], 1
-        ret
+        jmp     .changed
   .shutdown:
         cmp     eax, [shutdown_hwnd]
-        jne     .done
+        jne     .unchanged
+        cmp     [hover_shutdown], 1
+        je      .unchanged
         mov     [hover_shutdown], 1
-  .done:
+  .changed:
+        mov     eax, TRUE
+        ret
+  .unchanged:
+        xor     eax, eax
         ret
 endp
 
 proc ClearHoverForWindow
         cmp     eax, [clock_hwnd]
         jne     .calendar
+        cmp     [hover_clock], 0
+        je      .unchanged
         mov     [hover_clock], 0
-        ret
+        jmp     .changed
   .calendar:
         cmp     eax, [calendar_hwnd]
         jne     .volume
+        cmp     [hover_calendar], 0
+        je      .unchanged
         mov     [hover_calendar], 0
-        ret
+        jmp     .changed
   .volume:
         cmp     eax, [volume_hwnd]
         jne     .shutdown
+        cmp     [hover_volume], 0
+        je      .unchanged
         mov     [hover_volume], 0
-        ret
+        jmp     .changed
   .shutdown:
         cmp     eax, [shutdown_hwnd]
-        jne     .done
+        jne     .unchanged
+        cmp     [hover_shutdown], 0
+        je      .unchanged
         mov     [hover_shutdown], 0
-  .done:
+  .changed:
+        mov     eax, TRUE
+        ret
+  .unchanged:
+        xor     eax, eax
         ret
 endp
 
-proc PollHover
+proc PollHover uses ebx esi edi
+        local old_clock:DWORD
+        local old_calendar:DWORD
+        local old_volume:DWORD
+        local old_shutdown:DWORD
+        mov     eax, [hover_clock]
+        mov     [old_clock], eax
+        mov     eax, [hover_calendar]
+        mov     [old_calendar], eax
+        mov     eax, [hover_volume]
+        mov     [old_volume], eax
+        mov     eax, [hover_shutdown]
+        mov     [old_shutdown], eax
         invoke  GetCursorPos, cursor_point
         invoke  WindowFromPoint, [cursor_point.x], [cursor_point.y]
         mov     edx, eax
@@ -1478,6 +1934,46 @@ proc PollHover
         mov     [hover_shutdown], 0
         mov     eax, edx
         call    SetHoverForWindow
+        mov     eax, [hover_clock]
+        cmp     eax, [old_clock]
+        je      .calendar
+        invoke  InvalidateRect, [clock_hwnd], 0, FALSE
+  .calendar:
+        mov     eax, [hover_calendar]
+        cmp     eax, [old_calendar]
+        je      .volume
+        invoke  InvalidateRect, [calendar_hwnd], 0, FALSE
+  .volume:
+        mov     eax, [hover_volume]
+        cmp     eax, [old_volume]
+        je      .shutdown
+        invoke  InvalidateRect, [volume_hwnd], 0, FALSE
+  .shutdown:
+        mov     eax, [hover_shutdown]
+        cmp     eax, [old_shutdown]
+        je      .done
+        invoke  InvalidateRect, [shutdown_hwnd], 0, FALSE
+  .done:
+        ret
+endp
+
+proc UpdateCalendarDate
+        lea     eax, [speech_time]
+        invoke  GetLocalTime, eax
+        movzx   eax, [speech_time.wYear]
+        imul    eax, 512
+        movzx   ecx, [speech_time.wMonth]
+        shl     ecx, 5
+        add     eax, ecx
+        movzx   ecx, [speech_time.wDay]
+        add     eax, ecx
+        cmp     eax, [last_calendar_date]
+        je      .done
+        mov     [last_calendar_date], eax
+        cmp     [calendar_hwnd], 0
+        je      .done
+        invoke  InvalidateRect, [calendar_hwnd], 0, FALSE
+  .done:
         ret
 endp
 
@@ -1506,6 +2002,55 @@ proc BuildShutdownCommand uses ebx esi edi
         stosb
         loop    .write
         mov     byte [edi], 0
+        ret
+endp
+
+proc BuildAbortCommand uses esi edi
+        mov     edi, command_args
+        mov     esi, shutdown_abort_command
+  .copy:
+        lodsb
+        stosb
+        test    al, al
+        jnz     .copy
+        ret
+endp
+
+proc RunShutdownCommand uses ebx esi edi, command_line
+        local startup:STARTUPINFO
+        local process:PROCESS_INFORMATION
+        local exit_code:DWORD
+        lea     edi, [startup]
+        xor     eax, eax
+        mov     ecx, 17
+        rep     stosd
+        lea     edi, [process]
+        mov     ecx, 4
+        rep     stosd
+        mov     [startup.cb], 68
+        lea     eax, [startup]
+        lea     edx, [process]
+        invoke  CreateProcess, 0, [command_line], 0, 0, FALSE, 08000000h, 0, 0, eax, edx
+        test    eax, eax
+        jz      .failed
+        invoke  WaitForSingleObject, [process.hProcess], 0FFFFFFFFh
+        mov     ebx, FALSE
+        cmp     eax, WAIT_OBJECT_0
+        jne     .close
+        lea     eax, [exit_code]
+        invoke  GetExitCodeProcess, [process.hProcess], eax
+        test    eax, eax
+        jz      .close
+        cmp     [exit_code], 0
+        jne     .close
+        mov     ebx, TRUE
+  .close:
+        invoke  CloseHandle, [process.hThread]
+        invoke  CloseHandle, [process.hProcess]
+        mov     eax, ebx
+        ret
+  .failed:
+        xor     eax, eax
         ret
 endp
 
@@ -1712,9 +2257,21 @@ proc PaintCalendar uses ebx esi edi
         local daynum:DWORD
         local firstdow:DWORD
         local days:DWORD
+        local paintdc:DWORD
+        local memorydc:DWORD
+        local memorybitmap:DWORD
+        local oldbitmap:DWORD
         lea     eax, [ps]
         invoke  BeginPaint, [calendar_hwnd], eax
+        mov     [paintdc], eax
+        invoke  GetClientRect, [calendar_hwnd], client_rect
+        invoke  CreateCompatibleDC, [paintdc]
         mov     ebx, eax
+        mov     [memorydc], eax
+        invoke  CreateCompatibleBitmap, [paintdc], [client_rect.right], [client_rect.bottom]
+        mov     [memorybitmap], eax
+        invoke  SelectObject, ebx, eax
+        mov     [oldbitmap], eax
         mov     eax, [calendar_hwnd]
         mov     [current_paint_hwnd], eax
         stdcall SetupScaledDC, ebx, CAL_W, CAL_H
@@ -1864,7 +2421,12 @@ proc PaintCalendar uses ebx esi edi
         push    ebx
         call    DrawHoverClose
   .calendar_done:
-
+        ; Publish the fully rendered frame in one copy to prevent hover flicker.
+        invoke  SetMapMode, ebx, MM_TEXT
+        invoke  BitBlt, [paintdc], 0, 0, [client_rect.right], [client_rect.bottom], ebx, 0, 0, SRCCOPY
+        invoke  SelectObject, [memorydc], [oldbitmap]
+        invoke  DeleteObject, [memorybitmap]
+        invoke  DeleteDC, [memorydc]
         lea     eax, [ps]
         invoke  EndPaint, [calendar_hwnd], eax
         ret
@@ -1921,7 +2483,7 @@ proc PaintShutdown uses ebx esi edi
         invoke  SetTextColor, ebx, [theme_accent_text]
         invoke  SetTextAlign, ebx, TA_CENTER+TA_BASELINE
         invoke  lstrlen, move_text
-        invoke  TextOut, ebx, 125, 69, move_text, eax
+        invoke  TextOut, ebx, 125, 78, move_text, eax
         jmp     .no_shutdown_title
   .normal_shutdown:
         cmp     [shutdown_active], 0
@@ -1955,14 +2517,13 @@ proc PaintShutdown uses ebx esi edi
         cinvoke wsprintf, message_buffer, elapsed_format, [shutdown_elapsed], [shutdown_delay]
         invoke  SetTextAlign, ebx, TA_CENTER+TA_BASELINE
         invoke  lstrlen, message_buffer
-        invoke  TextOut, ebx, 125, 63, message_buffer, eax
+        invoke  TextOut, ebx, 125, 113, message_buffer, eax
   .shutdown_label:
         invoke  SelectObject, ebx, [font_heading]
         invoke  SetTextColor, ebx, [theme_text_secondary]
         invoke  SetTextAlign, ebx, TA_CENTER+TA_BASELINE
-        invoke  SetTextColor, ebx, [theme_text_secondary]
-        invoke  lstrlen, shutdown_hover_text
-        invoke  TextOut, ebx, 125, 96, shutdown_hover_text, eax
+        invoke  lstrlen, shutdown_label_text
+        invoke  TextOut, ebx, 125, 19, shutdown_label_text, eax
         cmp     [hover_shutdown], 1
         jne     .no_shutdown_title
         push    ebx
@@ -2051,8 +2612,8 @@ endp
 
 section '.data' data readable writeable
 
-  app_name          db 'Gadgets v9',0
-  class_name        db 'FasmGadgetsV9Window',0
+  app_name          db 'Gadgets v10',0
+  class_name        db 'FasmGadgetsV10Window',0
   clock_title       db 'Station Clock',0
   calendar_title    db 'Calendar',0
   volume_title      db 'Volume',0
@@ -2064,35 +2625,144 @@ section '.data' data readable writeable
   font_mono         db 'Consolas',0
   now_text          db 'Now',0
   delay_text        db 'Delay',0
+  cancel_text       db 'Cancel',0
   default_delay     db '180',0
   am_text           db 'am',0
   pm_text           db 'pm',0
   clock_hover_text  db 'CLOCK  |  right-click settings',0
   volume_hover_text db 'SETTINGS',0
   settings_label    db 'SETTINGS',0
-  shutdown_hover_text db 'ShutDown',0
+  shutdown_label_text db 'SHUTDOWN',0
   move_text         db 'MOVE',0
   move_countdown_format db '%02u:%02u',0
   close_label       db 'X',0
   shutdown_exe      db 'shutdown.exe',0
-  args_now          db '/s /t 0',0
-  shutdown_prefix   db '/s /t ',0
-  confirm_shutdown  db 'Shut down Windows now?',0
-  scheduled_format  db 'Windows will shut down in %u seconds.',0
+  args_now          db '/p /f',0
+  shutdown_abort_command db 'shutdown.exe /a',0
+  shutdown_prefix   db 'shutdown.exe /s /t ',0
   delay_error       db 'Enter a delay greater than zero seconds.',0
   volume_format     db 'Volume: %u%%',0
   elapsed_format    db '%u / %u sec',0
   error_text        db 'Gadgets could not start.',0
   settings_error_v9 db 'Font sizes: 10-36 points (today number up to 120).',13,10,'Scale: 50-200%. Opacity: 20-100%.',13,10,'Move reminder: 0-99 minutes (0 disables).',0
-  speech_time_format db 'The time is %u:%02u %s.',0
-  speech_unavailable_text db 'The Windows speech voice is unavailable.',13,10,'No setting was changed.',0
-  move_prompt_normal du 'It is time to move your body and get some blood flow going. Ten squats, or take a walk.',0
-  move_prompt_biological du 'Biological entity is required to move their body at this time, please. Ten squats at the very least, or find stairs and use them.',0
+  speech_unavailable_text db 'The selected Windows speech voice is unavailable.',13,10,'Install its Windows language/voice pack or choose another language.',0
+  language_english  db 'English',0
+  language_polish   db 'Polish',0
+  language_italian  db 'Italian',0
+  language_spanish  db 'Spanish',0
+  language_german   db 'German',0
+  language_japanese db 'Japanese',0
+  language_mandarin db 'Mandarin',0
+  language_french   db 'French',0
+  speech_settings_uri db 'ms-settings:speech',0
+
+  speech_lcids dd 0C09h,0415h,0410h,0C0Ah,0407h,0411h,0804h,040Ch
+  speech_voice_category du 'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech\Voices',0
+  speech_voice_onecore_category du 'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech_OneCore\Voices',0
+  speech_voice_categories dd speech_voice_category,speech_voice_onecore_category
+  voice_attr_en du 'Language=C09',0
+  voice_attr_pl du 'Language=415',0
+  voice_attr_it du 'Language=410',0
+  voice_attr_es du 'Language=C0A',0
+  voice_attr_de du 'Language=407',0
+  voice_attr_ja du 'Language=411',0
+  voice_attr_zh du 'Language=804',0
+  voice_attr_fr du 'Language=40C',0
+  speech_voice_attributes dd voice_attr_en,voice_attr_pl,voice_attr_it,voice_attr_es,voice_attr_de,voice_attr_ja,voice_attr_zh,voice_attr_fr
+  voice_fallback_en du 'Language=9',0
+  voice_fallback_pl du 'Language=15',0
+  voice_fallback_it du 'Language=10',0
+  voice_fallback_es du 'Language=A',0
+  voice_fallback_de du 'Language=7',0
+  voice_fallback_ja du 'Language=11',0
+  voice_fallback_zh du 'Language=404',0
+  voice_fallback_fr du 'Language=C',0
+  speech_voice_fallback_attributes dd voice_fallback_en,voice_fallback_pl,voice_fallback_it,voice_fallback_es,voice_fallback_de,voice_fallback_ja,voice_fallback_zh,voice_fallback_fr
+
+  speech_time_en du '<voice optional="Language=C09">The time is %s.</voice>',0
+  speech_time_pl du '<voice required="Language=415">Jest godzina %s.</voice>',0
+  speech_time_it du '<voice required="Language=410">Sono le %s.</voice>',0
+  speech_time_es du '<voice required="Language=C0A">Son las %s.</voice>',0
+  speech_time_de du '<voice required="Language=407">Es ist %s Uhr.</voice>',0
+  speech_time_ja du '<voice required="Language=411">現在時刻は%sです。</voice>',0
+  speech_time_zh du '<voice required="Language=804">现在时间是%s。</voice>',0
+  speech_time_fr du '<voice required="Language=40C">Il est %s.</voice>',0
+  speech_time_formats dd speech_time_en,speech_time_pl,speech_time_it,speech_time_es,speech_time_de,speech_time_ja,speech_time_zh,speech_time_fr
+
+  speech_date_en du '<voice optional="Language=C09">Today is %s.</voice>',0
+  speech_date_pl du '<voice required="Language=415">Dzisiaj jest %s.</voice>',0
+  speech_date_it du '<voice required="Language=410">Oggi è %s.</voice>',0
+  speech_date_es du '<voice required="Language=C0A">Hoy es %s.</voice>',0
+  speech_date_de du '<voice required="Language=407">Heute ist %s.</voice>',0
+  speech_date_ja du '<voice required="Language=411">今日は%sです。</voice>',0
+  speech_date_zh du '<voice required="Language=804">今天是%s。</voice>',0
+  speech_date_fr du '<voice required="Language=40C">Nous sommes le %s.</voice>',0
+  speech_date_formats dd speech_date_en,speech_date_pl,speech_date_it,speech_date_es,speech_date_de,speech_date_ja,speech_date_zh,speech_date_fr
+
+  move_normal_en du '<voice optional="Language=C09">It is time to move your body and get some blood flow going. Ten squats, or take a walk.</voice>',0
+  move_normal_pl du '<voice required="Language=415">Czas się poruszać i pobudzić krążenie. Zrób dziesięć przysiadów albo idź na spacer.</voice>',0
+  move_normal_it du '<voice required="Language=410">È ora di muovere il corpo e riattivare la circolazione. Fai dieci squat oppure una passeggiata.</voice>',0
+  move_normal_es du '<voice required="Language=C0A">Es hora de mover el cuerpo y activar la circulación. Haz diez sentadillas o sal a caminar.</voice>',0
+  move_normal_de du '<voice required="Language=407">Es ist Zeit, den Körper zu bewegen und den Kreislauf anzuregen. Mach zehn Kniebeugen oder geh spazieren.</voice>',0
+  move_normal_ja du '<voice required="Language=411">体を動かして血流を促す時間です。スクワットを10回するか、散歩しましょう。</voice>',0
+  move_normal_zh du '<voice required="Language=804">该活动身体、促进血液循环了。做十个深蹲，或者出去走走。</voice>',0
+  move_normal_fr du '<voice required="Language=40C">Il est temps de bouger et de stimuler la circulation. Faites dix flexions ou allez marcher.</voice>',0
+  move_prompt_normal_ptrs dd move_normal_en,move_normal_pl,move_normal_it,move_normal_es,move_normal_de,move_normal_ja,move_normal_zh,move_normal_fr
+
+  move_alternate_en du '<voice optional="Language=C09">Please move your body now. Do at least ten squats, or find stairs and use them.</voice>',0
+  move_alternate_pl du '<voice required="Language=415">Proszę teraz się poruszać. Zrób co najmniej dziesięć przysiadów albo przejdź się po schodach.</voice>',0
+  move_alternate_it du '<voice required="Language=410">È il momento di muoversi. Fai almeno dieci squat oppure usa le scale.</voice>',0
+  move_alternate_es du '<voice required="Language=C0A">Es momento de moverse. Haz al menos diez sentadillas o usa las escaleras.</voice>',0
+  move_alternate_de du '<voice required="Language=407">Jetzt ist Bewegung nötig. Mach mindestens zehn Kniebeugen oder benutze die Treppe.</voice>',0
+  move_alternate_ja du '<voice required="Language=411">今は体を動かしてください。少なくともスクワットを10回するか、階段を使いましょう。</voice>',0
+  move_alternate_zh du '<voice required="Language=804">现在请活动身体。至少做十个深蹲，或者走走楼梯。</voice>',0
+  move_alternate_fr du '<voice required="Language=40C">Veuillez bouger maintenant. Faites au moins dix flexions ou prenez les escaliers.</voice>',0
+  move_prompt_alternate_ptrs dd move_alternate_en,move_alternate_pl,move_alternate_it,move_alternate_es,move_alternate_de,move_alternate_ja,move_alternate_zh,move_alternate_fr
+
+  shutdown_now_en du '<voice optional="Language=C09">Shutting down now.</voice>',0
+  shutdown_now_pl du '<voice required="Language=415">Trwa wyłączanie komputera.</voice>',0
+  shutdown_now_it du '<voice required="Language=410">Arresto del computer in corso.</voice>',0
+  shutdown_now_es du '<voice required="Language=C0A">Apagando el equipo ahora.</voice>',0
+  shutdown_now_de du '<voice required="Language=407">Der Computer wird jetzt heruntergefahren.</voice>',0
+  shutdown_now_ja du '<voice required="Language=411">今すぐシャットダウンします。</voice>',0
+  shutdown_now_zh du '<voice required="Language=804">现在关机。</voice>',0
+  shutdown_now_fr du '<voice required="Language=40C">Arrêt de l’ordinateur en cours.</voice>',0
+  shutdown_now_prompts dd shutdown_now_en,shutdown_now_pl,shutdown_now_it,shutdown_now_es,shutdown_now_de,shutdown_now_ja,shutdown_now_zh,shutdown_now_fr
+
+  shutdown_scheduled_en du '<voice optional="Language=C09">Shutdown scheduled in %u seconds. Press cancel to stop it.</voice>',0
+  shutdown_scheduled_pl du '<voice required="Language=415">Wyłączenie zaplanowano za %u sekund. Naciśnij Anuluj, aby je zatrzymać.</voice>',0
+  shutdown_scheduled_it du '<voice required="Language=410">Arresto programmato tra %u secondi. Premi Annulla per interromperlo.</voice>',0
+  shutdown_scheduled_es du '<voice required="Language=C0A">Apagado programado en %u segundos. Pulsa Cancelar para detenerlo.</voice>',0
+  shutdown_scheduled_de du '<voice required="Language=407">Das Herunterfahren erfolgt in %u Sekunden. Drücken Sie Abbrechen, um es zu stoppen.</voice>',0
+  shutdown_scheduled_ja du '<voice required="Language=411">シャットダウンは%u秒後に予定されています。停止するにはキャンセルを押してください。</voice>',0
+  shutdown_scheduled_zh du '<voice required="Language=804">将在%u秒后关机。按取消可停止。</voice>',0
+  shutdown_scheduled_fr du '<voice required="Language=40C">Arrêt programmé dans %u secondes. Appuyez sur Annuler pour l’interrompre.</voice>',0
+  shutdown_scheduled_formats dd shutdown_scheduled_en,shutdown_scheduled_pl,shutdown_scheduled_it,shutdown_scheduled_es,shutdown_scheduled_de,shutdown_scheduled_ja,shutdown_scheduled_zh,shutdown_scheduled_fr
+
+  shutdown_cancelled_en du '<voice optional="Language=C09">Shutdown cancelled.</voice>',0
+  shutdown_cancelled_pl du '<voice required="Language=415">Anulowano wyłączenie.</voice>',0
+  shutdown_cancelled_it du '<voice required="Language=410">Arresto annullato.</voice>',0
+  shutdown_cancelled_es du '<voice required="Language=C0A">Apagado cancelado.</voice>',0
+  shutdown_cancelled_de du '<voice required="Language=407">Herunterfahren abgebrochen.</voice>',0
+  shutdown_cancelled_ja du '<voice required="Language=411">シャットダウンをキャンセルしました。</voice>',0
+  shutdown_cancelled_zh du '<voice required="Language=804">已取消关机。</voice>',0
+  shutdown_cancelled_fr du '<voice required="Language=40C">Arrêt annulé.</voice>',0
+  shutdown_cancelled_prompts dd shutdown_cancelled_en,shutdown_cancelled_pl,shutdown_cancelled_it,shutdown_cancelled_es,shutdown_cancelled_de,shutdown_cancelled_ja,shutdown_cancelled_zh,shutdown_cancelled_fr
+
+  shutdown_failed_en du '<voice optional="Language=C09">The shutdown command could not be started.</voice>',0
+  shutdown_failed_pl du '<voice required="Language=415">Nie udało się uruchomić polecenia wyłączenia.</voice>',0
+  shutdown_failed_it du '<voice required="Language=410">Impossibile avviare il comando di arresto.</voice>',0
+  shutdown_failed_es du '<voice required="Language=C0A">No se pudo iniciar el comando de apagado.</voice>',0
+  shutdown_failed_de du '<voice required="Language=407">Der Befehl zum Herunterfahren konnte nicht gestartet werden.</voice>',0
+  shutdown_failed_ja du '<voice required="Language=411">シャットダウンコマンドを開始できませんでした。</voice>',0
+  shutdown_failed_zh du '<voice required="Language=804">无法启动关机命令。</voice>',0
+  shutdown_failed_fr du '<voice required="Language=40C">Impossible de lancer la commande d’arrêt.</voice>',0
+  shutdown_failed_prompts dd shutdown_failed_en,shutdown_failed_pl,shutdown_failed_it,shutdown_failed_es,shutdown_failed_de,shutdown_failed_ja,shutdown_failed_zh,shutdown_failed_fr
   month_format      db 'MMMM yyyy',0
   bottom_date_format db 'dddd, MMMM yyyy',0
   day_format        db 'dddd',0
   number_format     db '%u',0
-  ini_name          db 'gadgets_v9.ini',0
+  ini_name          db 'gadgets_v10.ini',0
   section_clock     db 'Clock',0
   section_calendar  db 'Calendar',0
   section_month     db 'MonthHeading',0
@@ -2117,6 +2787,7 @@ section '.data' data readable writeable
   key_darkmode      db 'DarkMode',0
   key_moveinterval  db 'MoveReminderMinutes',0
   key_timeannouncement db 'TimeAnnouncementMinutes',0
+  key_speechlanguage db 'SpeechLanguage',0
   key_showclock     db 'ShowClock',0
   key_showcal       db 'ShowCalendar',0
   key_showvol       db 'ShowVolume',0
@@ -2138,6 +2809,8 @@ section '.data' data readable writeable
 
   CLSID_SpVoice GUID 96749377-3391-11D2-9EE3-00C04F797396
   IID_ISpVoice  GUID 6C44DF74-72B9-4992-A1EC-EF996E0422D4
+  CLSID_SpObjectTokenCategory GUID A910187F-0C7A-45AC-92CC-59EDAFB77B53
+  IID_ISpObjectTokenCategory GUID 2D3D3845-39AF-4850-BBF9-40B49780011D
 
   ; Unit circle coordinates, index 0 at twelve o'clock, clockwise.
   unit_x dw 0,105,208,309,407,500,588,669,743,809,866,914,951,978,995,1000,995,978,951,914,866,809,743,669,588,500,407,309,208,105,0,-105,-208,-309,-407,-500,-588,-669,-743,-809,-866,-914,-951,-978,-995,-1000,-995,-978,-951,-914,-866,-809,-743,-669,-588,-500,-407,-309,-208,-105
@@ -2184,8 +2857,17 @@ section '.data' data readable writeable
   move_edit_was_visible dd 1
   time_announcement_minutes dd 0
   last_announcement_minute dd -1
+  speech_language  dd LANGUAGE_ENGLISH
+  settings_original_language dd LANGUAGE_ENGLISH
+  speech_language_available rd LANGUAGE_COUNT
+  speech_voice_ready dd 0
   sapi_com_initialized dd 0
   sapi_voice ISpVoice
+  sapi_default_token ISpObjectToken
+  sapi_category ISpObjectTokenCategory
+  sapi_tokens IEnumSpObjectTokens
+  sapi_token ISpObjectToken
+  sapi_token_count dd 0
   window_ex_style   dd WS_EX_TOPMOST+WS_EX_TOOLWINDOW+WS_EX_LAYERED
   zorder_target     dd HWND_TOPMOST
   theme_clock_bg    dd 00F8F7F1h
@@ -2219,6 +2901,7 @@ section '.data' data readable writeable
   shutdown_active   dd 0
   shutdown_start_tick dd 0
   shutdown_elapsed dd 0
+  last_calendar_date dd 0
   volume_raw        dd 0
   volume_level      dd 50
   hover_clock       dd 0
@@ -2230,8 +2913,8 @@ section '.data' data readable writeable
                     dd 0
   command_args      rb 40
   message_buffer    rb 96
-  speech_buffer     rb 96
-  speech_wide_buffer rw 96
+  speech_wide_buffer rw 512
+  speech_value_wide rw 128
   speech_time       SYSTEMTIME
   ini_path          rb 260
   ini_value         rb 32
@@ -2248,13 +2931,13 @@ section '.data' data readable writeable
   client_rect       RECT
   day_rect          RECT
   center_rect       RECT 126,119,134,127
-  shutdown_panel_rect RECT 0,0,250,108
+  shutdown_panel_rect RECT 0,0,250,126
   volume_panel_rect RECT 5,5,245,87
   day_card_rect     RECT 0,214,250,420
   month_progress_track RECT 5,210,245,213
   month_progress_rect RECT 5,210,5,213
-  shutdown_progress_track RECT 7,45,243,69
-  shutdown_progress_fill RECT 7,45,7,69
+  shutdown_progress_track RECT 7,69,243,91
+  shutdown_progress_fill RECT 7,69,7,91
   bar_rect          RECT
   cursor_point      POINT
   save_rect         RECT
@@ -2275,10 +2958,10 @@ section '.data' data readable writeable
   scaled_gap        dd GAP
   ctrl_x1           dd 7
   ctrl_x2           dd 130
-  ctrl_y1           dd 7
+  ctrl_y1           dd 28
   ctrl_w            dd 113
-  ctrl_h            dd 32
-  edit_y            dd 45
+  ctrl_h            dd 30
+  edit_y            dd 69
   edit_w            dd 236
   edit_h            dd 24
 
@@ -2317,45 +3000,52 @@ section '.rsrc' resource data readable
 
   icon main_icon, icon_data, 'assets\gadgets-fasm.ico'
 
-  dialog settings_dialog, 'Gadget Settings', 0, 0, 280, 443, WS_CAPTION+WS_POPUP+WS_SYSMENU+DS_MODALFRAME+DS_CENTER, 0, 0, 'Segoe UI', 10
-    dialogitem 'BUTTON','Clock numbers',-1,8,7,264,44,WS_VISIBLE+BS_GROUPBOX
-    dialogitem 'STATIC','Size:',-1,20,25,34,12,WS_VISIBLE
-    dialogitem 'EDIT','',IDC_CLOCKSIZE,58,22,55,16,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER+ES_AUTOHSCROLL
-    dialogitem 'BUTTON','Bold',IDC_CLOCKBOLD,140,22,65,16,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
-    dialogitem 'BUTTON','Calendar dates',-1,8,55,264,44,WS_VISIBLE+BS_GROUPBOX
-    dialogitem 'STATIC','Size:',-1,20,73,34,12,WS_VISIBLE
-    dialogitem 'EDIT','',IDC_CALSIZE,58,70,55,16,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER+ES_AUTOHSCROLL
-    dialogitem 'BUTTON','Bold',IDC_CALBOLD,140,70,65,16,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
-    dialogitem 'BUTTON','Month and year heading',-1,8,103,264,44,WS_VISIBLE+BS_GROUPBOX
-    dialogitem 'STATIC','Size:',-1,20,121,34,12,WS_VISIBLE
-    dialogitem 'EDIT','',IDC_MONTHSIZE,58,118,55,16,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER+ES_AUTOHSCROLL
-    dialogitem 'BUTTON','Bold',IDC_MONTHBOLD,140,118,65,16,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
-    dialogitem 'BUTTON','Large today number',-1,8,151,264,44,WS_VISIBLE+BS_GROUPBOX
-    dialogitem 'STATIC','Size:',-1,20,169,34,12,WS_VISIBLE
-    dialogitem 'EDIT','',IDC_DAYSIZE,58,166,55,16,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER+ES_AUTOHSCROLL
-    dialogitem 'BUTTON','Bold',IDC_DAYBOLD,140,166,65,16,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
-    dialogitem 'BUTTON','Global appearance and visibility',-1,8,199,264,94,WS_VISIBLE+BS_GROUPBOX
-    dialogitem 'STATIC','Scale %:',-1,20,216,48,12,WS_VISIBLE
-    dialogitem 'EDIT','',IDC_SCALE,70,213,45,16,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER
-    dialogitem 'STATIC','Opacity %:',-1,134,216,58,12,WS_VISIBLE
-    dialogitem 'EDIT','',IDC_OPACITY,196,213,45,16,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER
-    dialogitem 'BUTTON','Clock',IDC_SHOWCLOCK,20,237,54,15,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
-    dialogitem 'BUTTON','Calendar',IDC_SHOWCAL,78,237,66,15,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
-    dialogitem 'BUTTON','Volume',IDC_SHOWVOL,148,237,60,15,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
-    dialogitem 'BUTTON','Shutdown',IDC_SHOWSHUT,210,237,62,15,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
-    dialogitem 'BUTTON','Keep windows on top',IDC_ONTOP,20,256,130,15,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
-    dialogitem 'BUTTON','Dark mode',IDC_DARKMODE,160,256,82,15,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
-    dialogitem 'STATIC','Uncheck a gadget to hide it.',-1,20,274,220,12,WS_VISIBLE
-    dialogitem 'BUTTON','Move reminder',-1,8,297,264,44,WS_VISIBLE+BS_GROUPBOX
-    dialogitem 'STATIC','Interval (minutes, 0 disables):',-1,20,315,158,12,WS_VISIBLE
-    dialogitem 'EDIT','',IDC_MOVEINT,186,312,55,16,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER+ES_AUTOHSCROLL
-    dialogitem 'BUTTON','Time announcements (Windows voice)',-1,8,345,264,62,WS_VISIBLE+BS_GROUPBOX
-    dialogitem 'BUTTON','Off',IDC_ANNOUNCEOFF,20,363,34,15,WS_VISIBLE+WS_TABSTOP+WS_GROUP+BS_AUTORADIOBUTTON
-    dialogitem 'BUTTON','Every 30 minutes',IDC_ANNOUNCE30,60,363,94,15,WS_VISIBLE+WS_TABSTOP+BS_AUTORADIOBUTTON
-    dialogitem 'BUTTON','Every hour',IDC_ANNOUNCE60,162,363,70,15,WS_VISIBLE+WS_TABSTOP+BS_AUTORADIOBUTTON
-    dialogitem 'BUTTON','Test time',IDC_TESTVOICE,48,383,80,18,WS_VISIBLE+WS_TABSTOP+BS_PUSHBUTTON
-    dialogitem 'BUTTON','Test MOVE',IDC_TESTMOVE,150,383,80,18,WS_VISIBLE+WS_TABSTOP+BS_PUSHBUTTON
-    dialogitem 'BUTTON','Apply',IDC_APPLY,52,414,52,19,WS_VISIBLE+WS_TABSTOP+BS_DEFPUSHBUTTON
-    dialogitem 'BUTTON','Cancel',IDCANCEL,112,414,52,19,WS_VISIBLE+WS_TABSTOP+BS_PUSHBUTTON
-    dialogitem 'BUTTON','Exit',IDC_QUIT,172,414,52,19,WS_VISIBLE+WS_TABSTOP+BS_PUSHBUTTON
+  dialog settings_dialog, 'Gadget Settings', 0, 0, 280, 340, WS_CAPTION+WS_POPUP+WS_SYSMENU+DS_MODALFRAME+DS_CENTER, 0, 0, 'Segoe UI', 9
+    dialogitem 'BUTTON','Font sizes',-1,8,5,264,78,WS_VISIBLE+BS_GROUPBOX
+    dialogitem 'STATIC','Clock:',-1,18,18,55,12,WS_VISIBLE
+    dialogitem 'EDIT','',IDC_CLOCKSIZE,78,15,43,15,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER+ES_AUTOHSCROLL
+    dialogitem 'BUTTON','Bold',IDC_CLOCKBOLD,139,16,48,14,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
+    dialogitem 'STATIC','Calendar:',-1,18,34,55,12,WS_VISIBLE
+    dialogitem 'EDIT','',IDC_CALSIZE,78,31,43,15,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER+ES_AUTOHSCROLL
+    dialogitem 'BUTTON','Bold',IDC_CALBOLD,139,32,48,14,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
+    dialogitem 'STATIC','Heading:',-1,18,50,55,12,WS_VISIBLE
+    dialogitem 'EDIT','',IDC_MONTHSIZE,78,47,43,15,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER+ES_AUTOHSCROLL
+    dialogitem 'BUTTON','Bold',IDC_MONTHBOLD,139,48,48,14,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
+    dialogitem 'STATIC','Today:',-1,18,66,55,12,WS_VISIBLE
+    dialogitem 'EDIT','',IDC_DAYSIZE,78,63,43,15,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER+ES_AUTOHSCROLL
+    dialogitem 'BUTTON','Bold',IDC_DAYBOLD,139,64,48,14,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
+    dialogitem 'BUTTON','Appearance and visibility',-1,8,86,264,72,WS_VISIBLE+BS_GROUPBOX
+    dialogitem 'STATIC','Scale %:',-1,18,101,45,12,WS_VISIBLE
+    dialogitem 'EDIT','',IDC_SCALE,66,98,42,15,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER
+    dialogitem 'STATIC','Opacity %:',-1,126,101,55,12,WS_VISIBLE
+    dialogitem 'EDIT','',IDC_OPACITY,184,98,42,15,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER
+    dialogitem 'BUTTON','Clock',IDC_SHOWCLOCK,18,118,49,14,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
+    dialogitem 'BUTTON','Calendar',IDC_SHOWCAL,70,118,61,14,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
+    dialogitem 'BUTTON','Volume',IDC_SHOWVOL,134,118,55,14,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
+    dialogitem 'BUTTON','Shutdown',IDC_SHOWSHUT,192,118,70,14,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
+    dialogitem 'BUTTON','Keep on top',IDC_ONTOP,18,138,90,14,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
+    dialogitem 'BUTTON','Dark mode',IDC_DARKMODE,126,138,78,14,WS_VISIBLE+WS_TABSTOP+BS_AUTOCHECKBOX
+    dialogitem 'BUTTON','Move reminder',-1,8,161,264,33,WS_VISIBLE+BS_GROUPBOX
+    dialogitem 'STATIC','Interval minutes (0 disables):',-1,18,174,148,12,WS_VISIBLE
+    dialogitem 'EDIT','',IDC_MOVEINT,180,170,46,15,WS_VISIBLE+WS_BORDER+WS_TABSTOP+ES_NUMBER+ES_AUTOHSCROLL
+    dialogitem 'BUTTON','Speech',-1,8,197,264,108,WS_VISIBLE+BS_GROUPBOX
+    dialogitem 'BUTTON','English',IDC_LANG_ENGLISH,18,209,57,14,WS_VISIBLE+WS_TABSTOP+WS_GROUP+BS_AUTORADIOBUTTON
+    dialogitem 'BUTTON','Polish',IDC_LANG_POLISH,78,209,50,14,WS_VISIBLE+WS_TABSTOP+BS_AUTORADIOBUTTON
+    dialogitem 'BUTTON','Italian',IDC_LANG_ITALIAN,132,209,52,14,WS_VISIBLE+WS_TABSTOP+BS_AUTORADIOBUTTON
+    dialogitem 'BUTTON','Spanish',IDC_LANG_SPANISH,188,209,62,14,WS_VISIBLE+WS_TABSTOP+BS_AUTORADIOBUTTON
+    dialogitem 'BUTTON','German',IDC_LANG_GERMAN,18,225,58,14,WS_VISIBLE+WS_TABSTOP+BS_AUTORADIOBUTTON
+    dialogitem 'BUTTON','Japanese',IDC_LANG_JAPANESE,80,225,66,14,WS_VISIBLE+WS_TABSTOP+BS_AUTORADIOBUTTON
+    dialogitem 'BUTTON','Mandarin',IDC_LANG_MANDARIN,150,225,66,14,WS_VISIBLE+WS_TABSTOP+BS_AUTORADIOBUTTON
+    dialogitem 'BUTTON','French',IDC_LANG_FRENCH,219,225,49,14,WS_VISIBLE+WS_TABSTOP+BS_AUTORADIOBUTTON
+    dialogitem 'BUTTON','Off',IDC_ANNOUNCEOFF,18,244,33,14,WS_VISIBLE+WS_TABSTOP+WS_GROUP+BS_AUTORADIOBUTTON
+    dialogitem 'BUTTON','Every 30 min',IDC_ANNOUNCE30,56,244,82,14,WS_VISIBLE+WS_TABSTOP+BS_AUTORADIOBUTTON
+    dialogitem 'BUTTON','Every hour',IDC_ANNOUNCE60,143,244,69,14,WS_VISIBLE+WS_TABSTOP+BS_AUTORADIOBUTTON
+    dialogitem 'BUTTON','Time',IDC_TESTVOICE,29,262,55,17,WS_VISIBLE+WS_TABSTOP+BS_PUSHBUTTON
+    dialogitem 'BUTTON','Date',IDC_TESTDATE,111,262,55,17,WS_VISIBLE+WS_TABSTOP+BS_PUSHBUTTON
+    dialogitem 'BUTTON','MOVE',IDC_TESTMOVE,193,262,55,17,WS_VISIBLE+WS_TABSTOP+BS_PUSHBUTTON
+    dialogitem 'BUTTON','Manage voices...',IDC_MANAGEVOICES,48,283,92,17,WS_VISIBLE+WS_TABSTOP+BS_PUSHBUTTON
+    dialogitem 'BUTTON','Refresh',IDC_REFRESHVOICES,151,283,75,17,WS_VISIBLE+WS_TABSTOP+BS_PUSHBUTTON
+    dialogitem 'BUTTON','Apply',IDC_APPLY,52,313,52,19,WS_VISIBLE+WS_TABSTOP+BS_DEFPUSHBUTTON
+    dialogitem 'BUTTON','Cancel',IDCANCEL,112,313,52,19,WS_VISIBLE+WS_TABSTOP+BS_PUSHBUTTON
+    dialogitem 'BUTTON','Exit',IDC_QUIT,172,313,52,19,WS_VISIBLE+WS_TABSTOP+BS_PUSHBUTTON
   enddialog
